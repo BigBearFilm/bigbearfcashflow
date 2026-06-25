@@ -4,6 +4,8 @@ const sb = window.supabase?.createClient(SUPABASE_URL, SUPABASE_KEY);
 const $=(s,r=document)=>r.querySelector(s), $$=(s,r=document)=>[...r.querySelectorAll(s)];
 const view=$('#view'), title=$('#screenTitle');
 const state={tab:'dashboard',query:'',data:emptySnapshot(),saldoByOp:new Map()};
+
+/* ---------- data layer (bez zmian) ---------- */
 function emptySnapshot(){return {personel:[],firmy:[],projekty:[],zaliczki:[],kosztyStale:[],dokumenty:[],urlopy:[],ustawienia:[defaultSettings()]}}
 function defaultSettings(){const d=isoDate();return {dataStartowa:d,dataWidokuOd:d,dataWidokuDo:addMonths(d,12),saldoKontoGlowne:0,saldoKontoVat:0,saldoKasaGotowkowa:0}}
 function isoDate(d=new Date()){return new Date(d).toISOString().slice(0,10)}
@@ -22,32 +24,115 @@ async function downloadActive(){await requireSession(); const {data:st,error:e1}
 async function boot(){try{const {data:{session}}=await sb.auth.getSession(); if(session){await downloadActive(); showApp(); render()} }catch(e){$('#loginStatus').textContent=e.message}}
 $('#loginForm').onsubmit=async e=>{e.preventDefault(); const f=new FormData(e.currentTarget); $('#loginStatus').textContent='Logowanie i pobieranie danych…'; try{const {error}=await sb.auth.signInWithPassword({email:f.get('email'),password:f.get('password')}); if(error) throw error; await downloadActive(); showApp(); render()}catch(err){$('#loginStatus').textContent=err.message}};
 function showApp(){$('#loginScreen').classList.add('hidden');$('#app').classList.remove('hidden')}
-function setDrawer(open){$('#drawer').classList.toggle('open',open);$('#scrim').classList.toggle('open',open);$('#drawer').setAttribute('aria-hidden',String(!open))}
-$('#menuButton').onclick=()=>setDrawer(true); $('#scrim').onclick=()=>setDrawer(false);
-$('#drawer').onclick=e=>{const b=e.target.closest('button[data-tab]'); if(!b)return; state.tab=b.dataset.tab; state.query=''; setDrawer(false); render()};
+
+/* ---------- nawigacja: dolny pasek + sheet ---------- */
+const PRIMARY=['dashboard','cashflow','documents','projects'];
+function setSheet(open){$('#sheet').classList.toggle('open',open);$('#scrim').classList.toggle('open',open);$('#sheet').setAttribute('aria-hidden',String(!open))}
+function pick(tab){state.tab=tab;state.query='';setSheet(false);render();window.scrollTo({top:0,behavior:'instant'})}
+$('#tabbar').onclick=e=>{const b=e.target.closest('button[data-tab]'); if(b) pick(b.dataset.tab)};
+$('#moreButton').onclick=()=>setSheet(true);
+$('#sheet').onclick=e=>{const b=e.target.closest('button[data-tab]'); if(b) pick(b.dataset.tab)};
+$('#scrim').onclick=()=>setSheet(false);
 $('#logoutButton').onclick=async()=>{await sb.auth.signOut(); localStorage.removeItem('bb.cashflow.readonly.snapshot'); location.reload()};
-$('#refreshButton').onclick=async()=>{try{await downloadActive();render()}catch(e){alert(e.message)}};
-function render(){ $$('#drawer [data-tab]').forEach(b=>b.classList.toggle('active',b.dataset.tab===state.tab)); const names={dashboard:'Pulpit',cashflow:'Cashflow',documents:'Dokumenty',projects:'Projekty',personel:'Personel',firms:'Firmy',fixedCosts:'Koszty stałe',advances:'Zaliczki',leaves:'Urlopy'}; title.textContent=names[state.tab]; ({dashboard,cashflow,documents,projects,personel,firms,fixedCosts,advances,leaves})[state.tab](); }
-function metric(label,value){return `<div class="card"><h3>${label}</h3><div class="metric">${value}</div></div>`}
-function dashboard(){const docs=state.data.dokumenty, projects=state.data.projekty; const income=docs.filter(d=>d.typRaw==='Przychód').reduce((s,d)=>s+net(d),0); const costs=docs.filter(d=>['Wydatek','Personel'].includes(d.typRaw)).reduce((s,d)=>s+net(d),0); const ops=calcCashflow().slice(0,5); view.innerHTML=`<section class="grid">${metric('Bilans netto',money(income-costs))}${metric('Przychody netto',money(income))}${metric('Koszty netto',money(costs))}${metric('Dokumenty',docs.length)}${metric('Projekty',projects.length)}<div class="card wide"><div class="row"><h3>Najbliższe operacje</h3><button class="secondary" data-go="cashflow">Pokaż</button></div>${ops.length?`<div class="table">${ops.map(opRow).join('')}</div>`:emptyHtml('Brak operacji.')}</div></section>`; $('[data-go]')?.addEventListener('click',()=>{state.tab='cashflow';render()}); bindOpRows()}
-function emptyHtml(t){return `<div class="empty"><p>${esc(t)}</p></div>`}
-function tableSearch(){return `<input class="search" placeholder="Szukaj…" value="${esc(state.query)}">`}
-function bindSearch(){ $('.search')?.addEventListener('input',e=>{state.query=e.target.value;render()}) }
-function renderTable(cols,rows,onClick){const q=state.query.toLowerCase(); const f=rows.filter(r=>JSON.stringify(r.raw).toLowerCase().includes(q)); view.innerHTML=tableSearch()+`<div class="table scroll-x"><table><thead><tr>${cols.map(c=>`<th>${esc(c)}</th>`).join('')}</tr></thead><tbody>${f.length?f.map(r=>`<tr data-id="${r.id}">${r.cells.map(c=>`<td>${c}</td>`).join('')}</tr>`).join(''):`<tr><td colspan="${cols.length}">Brak danych</td></tr>`}</tbody></table></div>`; bindSearch(); $$('tbody tr[data-id]').forEach(tr=>tr.onclick=()=>onClick(rows.find(r=>r.id===tr.dataset.id).raw));}
-function documents(){renderTable(['Nazwa','Typ','Kontrahent','Projekt','Termin','Brutto'], state.data.dokumenty.map(d=>({id:d.id,raw:d,cells:[esc(d.nazwaWewnetrzna||d.nazwaKsiegowa||'—'),esc(d.typRaw||'—'),esc(partyName(d)),esc(projectName(d.projektId)),fmtDate(d.dataWymagalnosci),`<strong class="${d.typRaw==='Przychód'?'plus':'minus'}">${money(gross(d))}</strong>`]})), openDocument)}
-function projects(){renderTable(['Projekt','Dział','Status','Bilans netto'], state.data.projekty.map(p=>{const docs=state.data.dokumenty.filter(d=>d.projektId===p.id); const bal=docs.reduce((s,d)=>s+(d.typRaw==='Przychód'?net(d):-net(d)),0); return {id:p.id,raw:p,cells:[esc(p.nazwa||'—'),esc(p.dzialRaw||'—'),esc(p.statusRaw||'—'),`<strong class="${bal>=0?'plus':'minus'}">${money(bal)}</strong>`]}}), openProject)}
-function personel(){renderTable(['Imię i nazwisko','Email','Telefon','Konto'], state.data.personel.map(p=>({id:p.id,raw:p,cells:[esc(`${p.imie||''} ${p.nazwisko||''}`.trim()||'—'),esc(p.email||'—'),esc(p.numerTelefonu||'—'),esc(p.numerKontaBankowego||'—')]})), openPerson)}
-function firms(){renderTable(['Nazwa','NIP','Email','Konto'], state.data.firmy.map(f=>({id:f.id,raw:f,cells:[esc(f.nazwa||'—'),esc(f.nip||'—'),esc(f.email||'—'),esc(f.numerKontaBankowego||'—')]})), openFirm)}
-function fixedCosts(){renderTable(['Nazwa','Rodzaj','Kwota','Dzień','Aktywny'], state.data.kosztyStale.map(k=>({id:k.id,raw:k,cells:[esc(k.nazwa||'—'),esc(k.rodzajRaw||'—'),money((Number(k.kwotaNetto)||0)*(1+(Number(k.stawkaVat)||0)/100)),esc(k.dzienMiesiaca||'—'),k.aktywny!==false?'Tak':'Nie']})), openFixedCost)}
-function advances(){renderTable(['Nazwa','Pracownik','Projekt','Kwota','Status'], state.data.zaliczki.map(z=>({id:z.id,raw:z,cells:[esc(z.nazwa||'—'),esc(personName(z.pracownikId)),esc(projectName(z.projektId)),money(z.kwota),esc(z.statusRaw||'—')]})), openAdvance)}
-function leaves(){renderTable(['Pracownik','Od','Do','Dni','Status'], state.data.urlopy.map(l=>({id:l.id,raw:l,cells:[esc(personName(l.pracownikId)),fmtDate(l.dataOd),fmtDate(l.dataDo),esc(l.liczbaDniRoboczych||0),esc(l.statusRaw||'—')]})), openLeave)}
+async function doRefresh(btn){if(btn)btn.disabled=true; try{await downloadActive();render()}catch(e){alert(e.message)} finally{if(btn)btn.disabled=false}}
+$('#refreshButton').onclick=()=>doRefresh();
+$('#refreshButton2').onclick=()=>{setSheet(false);doRefresh($('#refreshButton2'))};
+
+function render(){
+  $$('#tabbar [data-tab]').forEach(b=>b.classList.toggle('active',b.dataset.tab===state.tab));
+  $('#moreButton').classList.toggle('active',!PRIMARY.includes(state.tab));
+  const names={dashboard:'Pulpit',cashflow:'Cashflow',documents:'Dokumenty',projects:'Projekty',personel:'Personel',firms:'Firmy',fixedCosts:'Koszty stałe',advances:'Zaliczki',leaves:'Urlopy'};
+  title.textContent=names[state.tab];
+  ({dashboard,cashflow,documents,projects,personel,firms,fixedCosts,advances,leaves})[state.tab]();
+}
+
+/* ---------- helpers UI ---------- */
+function initials(s=''){return (String(s).trim().split(/\s+/).map(w=>w[0]||'').slice(0,2).join('')||'•').toUpperCase()}
+function emptyHtml(t){return `<div class="empty"><div class="ei"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#aab3c2" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3-3"/></svg></div><p>${esc(t)}</p></div>`}
+function searchBar(){return `<div class="search-wrap"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3-3"/></svg><input class="search" placeholder="Szukaj…" value="${esc(state.query)}"></div>`}
+function bindSearch(){ $('.search')?.addEventListener('input',e=>{state.query=e.target.value;renderList()}) }
+let _lastList=null;
+function renderList(){ if(_lastList) _lastList(); }
+
+function listView(rows,onClick){
+  _lastList=()=>listView(rows,onClick);
+  const q=state.query.toLowerCase();
+  const f=rows.filter(r=>JSON.stringify(r.raw).toLowerCase().includes(q));
+  view.innerHTML = searchBar() + (f.length
+    ? `<div class="list">${f.map(r=>`<button class="lrow" data-id="${esc(r.id)}"><span class="lead ${r.lead.cls}">${esc(r.lead.txt)}</span><span class="lmain"><span class="ltitle">${esc(r.title)}</span><span class="lsub">${r.subHtml}</span></span><span class="lend">${r.endHtml}</span></button>`).join('')}</div>`
+    : emptyHtml('Brak pozycji'));
+  bindSearch();
+  $$('.lrow[data-id]').forEach(el=>el.onclick=()=>onClick(rows.find(r=>r.id===el.dataset.id).raw));
+}
+
+/* ---------- PULPIT ---------- */
+function stat(k,v,dot,cls){return `<div class="stat"><div class="k"><span class="dot ${dot}"></span>${k}</div><div class="v num ${cls||''}">${v}</div></div>`}
+function dashboard(){
+  _lastList=null;
+  const docs=state.data.dokumenty, projects=state.data.projekty;
+  const income=docs.filter(d=>d.typRaw==='Przychód').reduce((s,d)=>s+net(d),0);
+  const costs=docs.filter(d=>['Wydatek','Personel'].includes(d.typRaw)).reduce((s,d)=>s+net(d),0);
+  const ops=calcCashflow().slice(0,5);
+  view.innerHTML=`
+    <div class="hero">
+      <div class="label">Bilans netto</div>
+      <div class="big num">${money(income-costs)}</div>
+      <div class="range"><b>${docs.length} dokumentów</b><b>${projects.length} projektów</b></div>
+    </div>
+    <div class="stats">
+      ${stat('Przychody netto',money(income),'g','plus')}
+      ${stat('Koszty netto',money(costs),'r','minus')}
+      ${stat('Dokumenty',docs.length,'b')}
+      ${stat('Projekty',projects.length,'n')}
+    </div>
+    <div class="section-title"><h2>Najbliższe operacje</h2><button class="secondary" data-go>Cashflow</button></div>
+    <div class="card">${ops.length?ops.map(opRow).join(''):emptyHtml('Brak operacji.')}</div>`;
+  $('[data-go]')?.addEventListener('click',()=>pick('cashflow'));
+  bindOpRows();
+}
+function opRow(o){const inn=o.kwota>=0;return `<div class="op-row" data-op="${o.id}"><div class="om"><strong>${esc(o.nazwa)}</strong><span>${fmtDate(o.date)} · ${esc(o.opis||'')}</span></div><div class="oa ${inn?'plus':'minus'} num">${money(o.kwota)}</div></div>`}
+
+/* ---------- CASHFLOW ---------- */
 function calcCashflow(){const u=state.data.ustawienia[0]||defaultSettings(), from=new Date(u.dataWidokuOd||u.dataStartowa), to=new Date(u.dataWidokuDo||addMonths(from,12)); const ops=[]; state.data.dokumenty.forEach(d=>{if(!['Przychód','Wydatek','Personel'].includes(d.typRaw)||d.rodzajRozliczeniaRaw==='Zaliczka'||d.kosztStalyId)return; const date=new Date(d.dataPlatnosci||d.dataWymagalnosci); if(date>=from&&date<=to){const sign=d.typRaw==='Przychód'?1:-1; ops.push({id:'dok-'+d.id,kind:'document',source:d,date,nazwa:d.nazwaWewnetrzna||d.nazwaKsiegowa||'Dokument',opis:partyName(d),kwota:sign*gross(d),typ:d.typRaw,konto:d.rodzajStronyRaw==='Osoba'?state.data.personel.find(p=>p.id===d.osobaId)?.numerKontaBankowego:state.data.firmy.find(f=>f.id===d.firmaId)?.numerKontaBankowego})}}); state.data.zaliczki.forEach(z=>{const date=new Date(z.dataWyplaty); if(date>=from&&date<=to&&Number(z.kwota)>0) ops.push({id:'zal-'+z.id,kind:'advance',source:z,date,nazwa:z.nazwa||'Zaliczka',opis:personName(z.pracownikId),kwota:-Number(z.kwota),typ:'Zaliczka',konto:state.data.personel.find(p=>p.id===z.pracownikId)?.numerKontaBankowego})}); state.data.kosztyStale.filter(k=>k.aktywny!==false).forEach(k=>{let d=new Date(k.pierwszyMiesiac||from); d.setDate(Number(k.dzienMiesiaca)||1); const end=k.bezOstatniegoMiesiaca?to:new Date(k.ostatniMiesiac||to); while(d<=to&&d<=end){if(d>=from){const v=(Number(k.kwotaNetto)||0)*(k.rodzajRaw==='Personel'?1:(1+(Number(k.stawkaVat)||0)/100)); ops.push({id:'koszt-'+k.id+'-'+isoDate(d),kind:'fixedCost',source:k,date:new Date(d),nazwa:k.nazwa||'Koszt stały',opis:k.rodzajRaw,kwota:-v,typ:'Koszt stały',konto:k.rodzajRaw==='Personel'?state.data.personel.find(p=>p.id===k.osobaId)?.numerKontaBankowego:state.data.firmy.find(f=>f.id===k.dostawcaId)?.numerKontaBankowego})} d.setMonth(d.getMonth()+1)}}); return ops.sort((a,b)=>a.date-b.date)}
-function cashflow(){const u=state.data.ustawienia[0]||defaultSettings(); let saldo=Number(u.saldoKontoGlowne||0)+Number(u.saldoKontoVat||0)+Number(u.saldoKasaGotowkowa||0); const ops=calcCashflow(); state.saldoByOp.clear(); view.innerHTML=`<div class="card"><h3>Saldo startowe</h3><div class="metric">${money(saldo)}</div><p class="small muted">${fmtDate(u.dataWidokuOd)} – ${fmtDate(u.dataWidokuDo)}</p></div><div class="table"><table><thead><tr><th>Data</th><th>Pozycja</th><th>Kwota</th><th>Po dniu</th></tr></thead><tbody>${ops.map(o=>{saldo+=o.kwota; state.saldoByOp.set(o.id,saldo); return `<tr data-op="${o.id}"><td>${fmtDate(o.date)}</td><td><strong>${esc(o.nazwa)}</strong><br><span class="muted small">${esc(o.typ)} · ${esc(o.opis||'')}</span></td><td><strong class="${o.kwota>=0?'plus':'minus'}">${money(o.kwota)}</strong></td><td>${money(saldo)}</td></tr>`}).join('')||'<tr><td colspan="4">Brak operacji</td></tr>'}</tbody></table></div>`; bindOpRows()}
-function opRow(o){return `<div class="op-row" data-op="${o.id}"><div><strong>${esc(o.nazwa)}</strong><span>${fmtDate(o.date)} · ${esc(o.opis||'')}</span></div><strong class="${o.kwota>=0?'plus':'minus'}">${money(o.kwota)}</strong></div>`}
+function cashflow(){
+  _lastList=null;
+  const u=state.data.ustawienia[0]||defaultSettings();
+  let saldo=Number(u.saldoKontoGlowne||0)+Number(u.saldoKontoVat||0)+Number(u.saldoKasaGotowkowa||0);
+  const ops=calcCashflow();
+  state.saldoByOp.clear();
+  let rows='', lastDay='', open=false;
+  ops.forEach(o=>{
+    saldo+=o.kwota; state.saldoByOp.set(o.id,saldo);
+    const day=fmtDate(o.date);
+    if(day!==lastDay){ if(open) rows+='</div>'; rows+=`<div class="tday">${day}</div><div class="tgroup">`; open=true; lastDay=day; }
+    const inn=o.kwota>=0;
+    rows+=`<button class="cfrow" data-op="${o.id}"><span class="tdir ${inn?'in':'out'}">${inn?'+':'−'}</span><span class="cmain"><span class="ctitle">${esc(o.nazwa)}</span><span class="csub">${esc(o.typ)} · ${esc(o.opis||'')}</span></span><span class="cend"><span class="camt ${inn?'plus':'minus'} num">${money(o.kwota)}</span><span class="cbal num">${money(saldo)}</span></span></button>`;
+  });
+  if(open) rows+='</div>';
+  view.innerHTML=`
+    <div class="hero">
+      <div class="label">Saldo startowe</div>
+      <div class="big num">${money(Number(u.saldoKontoGlowne||0)+Number(u.saldoKontoVat||0)+Number(u.saldoKasaGotowkowa||0))}</div>
+      <div class="range"><b>${fmtDate(u.dataWidokuOd)}</b><span>→</span><b>${fmtDate(u.dataWidokuDo)}</b></div>
+    </div>
+    ${ops.length?`<div class="timeline">${rows}</div>`:emptyHtml('Brak operacji w okresie.')}`;
+  bindOpRows();
+}
+
+/* ---------- LISTY ---------- */
+function documents(){listView(state.data.dokumenty.map(d=>{const inc=d.typRaw==='Przychód';const cls=inc?'g':(['Wydatek','Personel'].includes(d.typRaw)?'r':'n');return {id:d.id,raw:d,lead:{txt:initials(partyName(d)),cls},title:d.nazwaWewnetrzna||d.nazwaKsiegowa||'—',subHtml:`<span class="chip ${cls}">${esc(d.typRaw||'—')}</span><span>${esc(projectName(d.projektId))}</span>`,endHtml:`<span class="lamt ${inc?'plus':'minus'} num">${money(gross(d))}</span><span class="lmeta">${fmtDate(d.dataWymagalnosci)}</span>`}}), openDocument)}
+function projects(){listView(state.data.projekty.map(p=>{const docs=state.data.dokumenty.filter(d=>d.projektId===p.id);const bal=docs.reduce((s,d)=>s+(d.typRaw==='Przychód'?net(d):-net(d)),0);return {id:p.id,raw:p,lead:{txt:initials(p.nazwa),cls:bal>=0?'g':'r'},title:p.nazwa||'—',subHtml:`<span class="chip n">${esc(p.dzialRaw||'—')}</span><span>${esc(p.statusRaw||'—')}</span>`,endHtml:`<span class="lamt ${bal>=0?'plus':'minus'} num">${money(bal)}</span><span class="lmeta">${docs.length} dok.</span>`}}), openProject)}
+function personel(){listView(state.data.personel.map(p=>({id:p.id,raw:p,lead:{txt:initials(`${p.imie||''} ${p.nazwisko||''}`),cls:'b'},title:`${p.imie||''} ${p.nazwisko||''}`.trim()||'—',subHtml:`<span>${esc(p.email||'—')}</span>`,endHtml:`<span class="lmeta">${esc(p.numerTelefonu||'')}</span>`})), openPerson)}
+function firms(){listView(state.data.firmy.map(f=>({id:f.id,raw:f,lead:{txt:initials(f.nazwa),cls:'n'},title:f.nazwa||'—',subHtml:`<span>${f.nip?('NIP '+esc(f.nip)):'—'}</span>`,endHtml:`<span class="lmeta">${esc(f.numerTelefonu||f.email||'')}</span>`})), openFirm)}
+function fixedCosts(){listView(state.data.kosztyStale.map(k=>{const on=k.aktywny!==false;const kwota=(Number(k.kwotaNetto)||0)*(1+(Number(k.stawkaVat)||0)/100);return {id:k.id,raw:k,lead:{txt:initials(k.nazwa),cls:on?'r':'n'},title:k.nazwa||'—',subHtml:`<span class="chip ${k.rodzajRaw==='Personel'?'b':'n'}">${esc(k.rodzajRaw||'—')}</span><span>dzień ${esc(k.dzienMiesiaca||'—')}</span>`,endHtml:`<span class="lamt minus num">${money(kwota)}</span><span class="lmeta">${on?'aktywny':'wstrzymany'}</span>`}}), openFixedCost)}
+function advances(){listView(state.data.zaliczki.map(z=>({id:z.id,raw:z,lead:{txt:initials(z.nazwa||personName(z.pracownikId)),cls:'g'},title:z.nazwa||'—',subHtml:`<span>${esc(personName(z.pracownikId))} · ${esc(projectName(z.projektId))}</span>`,endHtml:`<span class="lamt minus num">${money(z.kwota)}</span><span class="lmeta">${esc(z.statusRaw||'—')}</span>`})), openAdvance)}
+function leaves(){listView(state.data.urlopy.map(l=>({id:l.id,raw:l,lead:{txt:initials(personName(l.pracownikId)),cls:'b'},title:personName(l.pracownikId),subHtml:`<span>${fmtDate(l.dataOd)} – ${fmtDate(l.dataDo)}</span>`,endHtml:`<span class="lamt num">${esc(l.liczbaDniRoboczych||0)} dni</span><span class="lmeta">${esc(l.statusRaw||'—')}</span>`})), openLeave)}
+
+/* ---------- MODALE ---------- */
 function bindOpRows(){$$('[data-op]').forEach(el=>el.onclick=()=>openTransfer(calcCashflow().find(o=>o.id===el.dataset.op)))}
 function modal(t,html){$('#modalTitle').textContent=t; $('#modalBody').innerHTML=html; $('#modal').showModal()}
 function detail(rows){return `<div class="detail">${rows.filter(r=>r[1]!==undefined&&r[1]!==null&&r[1]!==''&&r[1]!=='—').map(([k,v])=>`<div><span>${esc(k)}</span><strong>${esc(v)}</strong></div>`).join('')}</div>`}
-function openTransfer(o){if(!o)return; const out=o.kwota<0; modal('Widok przelewu', detail([['Typ',o.typ],['Nazwa',o.nazwa],['Odbiorca / nadawca',o.opis],['Data',fmtDate(o.date)],['Kwota',money(Math.abs(o.kwota))],['Kierunek',out?'Do zapłaty':'Wpływ'],['Numer konta',o.konto||'brak w danych'],['Saldo po operacji',money(state.saldoByOp.get(o.id))]]) + `<p class="small muted">Ten ekran jest tylko do odczytu — nie wykonuje przelewu i nie zapisuje zmian.</p>`)}
+function openTransfer(o){if(!o)return; const out=o.kwota<0; modal('Widok przelewu', `<div class="transfer-hero"><div class="th-amt num ${out?'minus':'plus'}">${money(Math.abs(o.kwota))}</div><div class="th-dir">${out?'Do zapłaty':'Wpływ'}</div></div>`+detail([['Typ',o.typ],['Nazwa',o.nazwa],['Odbiorca / nadawca',o.opis],['Data',fmtDate(o.date)],['Numer konta',o.konto||'brak w danych'],['Saldo po operacji',money(state.saldoByOp.get(o.id))]]) + `<p class="transfer-note">Ten ekran jest tylko do odczytu — nie wykonuje przelewu i nie zapisuje zmian.</p>`)}
 function openDocument(d){modal('Dokument', detail([['Nazwa wewnętrzna',d.nazwaWewnetrzna],['Nazwa księgowa',d.nazwaKsiegowa],['Typ',d.typRaw],['Dokument',d.typDokumentuRaw],['Kontrahent',partyName(d)],['Projekt',projectName(d.projektId)],['Netto',money(d.kwotaNetto)],['VAT',`${d.stawkaVat||0}%`],['Brutto',money(gross(d))],['Rozliczenie',d.rodzajRozliczeniaRaw],['Data sprzedaży',fmtDate(d.dataSprzedazy)],['Termin',fmtDate(d.dataWymagalnosci)],['Data płatności',fmtDate(d.dataPlatnosci)],['Treść / notatki',d.trescUmowy]]))}
 function openProject(p){modal('Projekt', detail([['Nazwa',p.nazwa],['Dział',p.dzialRaw],['Status',p.statusRaw],['Utworzono',fmtDate(p.utworzono)]]))}
 function openPerson(p){modal('Personel', detail([['Imię',p.imie],['Nazwisko',p.nazwisko],['Email',p.email],['Telefon',p.numerTelefonu],['Konto bankowe',p.numerKontaBankowego],['PESEL',p.pesel],['Urząd skarbowy',p.urzadSkarbowy],['Adres',p.adresZamieszkania]]))}
@@ -55,4 +140,6 @@ function openFirm(f){modal('Firma', detail([['Nazwa',f.nazwa],['NIP',f.nip],['RE
 function openFixedCost(k){modal('Koszt stały', detail([['Nazwa',k.nazwa],['Rodzaj',k.rodzajRaw],['Kwota netto',money(k.kwotaNetto)],['VAT',`${k.stawkaVat||0}%`],['Rozliczenie',k.rodzajRozliczeniaRaw],['Dzień miesiąca',k.dzienMiesiaca],['Pierwszy miesiąc',fmtDate(k.pierwszyMiesiac)],['Ostatni miesiąc',k.bezOstatniegoMiesiaca?'bez końca':fmtDate(k.ostatniMiesiac)],['Aktywny',k.aktywny!==false?'Tak':'Nie']]))}
 function openAdvance(z){modal('Zaliczka', detail([['Nazwa',z.nazwa],['Kwota',money(z.kwota)],['Status',z.statusRaw],['Pracownik',personName(z.pracownikId)],['Projekt',projectName(z.projektId)],['Data wypłaty',fmtDate(z.dataWyplaty)],['Termin rozliczenia',fmtDate(z.terminRozliczenia)],['Data zwrotu',fmtDate(z.dataZwrotu)]]))}
 function openLeave(l){modal('Urlop', detail([['Pracownik',personName(l.pracownikId)],['Od',fmtDate(l.dataOd)],['Do',fmtDate(l.dataDo)],['Dni robocze',l.liczbaDniRoboczych],['Status',l.statusRaw]]))}
-if('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(()=>{}); boot();
+
+if('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(()=>{});
+boot();
