@@ -1,0 +1,9 @@
+{
+  "name": "Big Bear Cashflow",
+  "short_name": "Cashflow",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#f6f8fb",
+  "theme_color": "#f6f8fb",
+  "icons": [{"src":"icon.png","sizes":"1024x1024","type":"image/png","purpose":"any maskable"}]
+}
